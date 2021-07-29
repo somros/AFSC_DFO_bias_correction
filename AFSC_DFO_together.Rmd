@@ -1,0 +1,109 @@
+---
+title: "AFSC and DFO together"
+author: "Alberto Rovellini"
+date: "7/13/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message = FALSE}
+library(tidyverse)
+library(sf)
+library(maps)
+library(mapdata)
+library(rbgm)
+library(viridis)
+```
+
+```{r}
+select <- dplyr::select
+```
+
+# Read data
+
+Read in spatial information.
+```{r}
+# bgm
+atlantis_bgm <- read_bgm("data/GOA_WGS84_V4_final.bgm")
+atlantis_boxes <- box_sf(atlantis_bgm)
+
+#coastline
+coast <- maps::map("worldHires", regions = c("Canada", "USA"), plot = FALSE, fill = TRUE)
+coast_sf <- coast %>% st_as_sf() %>% st_transform(crs = atlantis_bgm$extra$projection)
+coast_sf <- coast_sf %>% st_crop(st_bbox(atlantis_boxes))
+```
+
+Get the groups that we have for both AFSC and DFO.
+```{r}
+afsc_groups <- list.files("C:/Users/arove/Documents/GOA/SDM/sdmTMB_forGemma_May2021/output/cpue_tables/")
+afsc_groups <- gsub("_AFSC.csv","",afsc_groups)
+
+dfo_groups <- list.files("C:/Users/arove/Documents/GOA/SDM/Canada/outputs/knitted_output_afterSean/cpue_tables/")
+dfo_groups <- gsub("_DFO.csv","",dfo_groups)
+
+ag <- intersect(afsc_groups,dfo_groups)
+```
+
+Read in the bias correction factors.
+```{r}
+correction_factors <- read.csv("correction_factors.csv")
+correction_factors <- correction_factors[complete.cases(correction_factors),]
+correction_factors <- correction_factors %>% filter_all(all_vars(!is.infinite(.)))
+
+ag <- intersect(ag, correction_factors %>% select(group) %>% pull())
+```
+
+Read in biomass maps for AFSC and DFO.
+```{r}
+biomass_maps <- function(this_group){
+  afsc <- read.csv(paste0("C:/Users/arove/Documents/GOA/SDM/sdmTMB_forGemma_May2021/output/cpue_tables/",this_group,"_AFSC.csv"))
+  dfo <- read.csv(paste0("C:/Users/arove/Documents/GOA/SDM/Canada/outputs/knitted_output_afterSean/cpue_tables/",this_group,"_DFO.csv"))
+  
+  goa <- rbind(afsc,dfo)
+  
+  cpue_boxes <- atlantis_boxes %>% left_join(goa, by = c(".bx0" = "box_id"))
+  cpue_boxes <- cpue_boxes %>% select(.bx0,boundary.x,botz,area.x,all_years_kgkm2,biomass)
+  
+  # calculate proportion of the total
+  cpue_boxes <- cpue_boxes %>% mutate(prop = biomass/sum(biomass,na.rm=TRUE))
+  
+  # plot
+  p <- ggplot()+
+    geom_sf(data = cpue_boxes, aes(fill = prop), size = 0.2)+
+    scale_fill_viridis()+
+    geom_sf(data = coast_sf)+
+    theme_minimal()+
+    labs(title = paste0(this_group,"_S1-S4 before bias correction"))
+  
+  
+  ggsave(paste0("maps_with_bias/",this_group,".png"), p, width = 8, height = 3.5, units = "in", dpi = 600)
+  
+  # now apply the bias correction to the dfo data
+  
+  cpue_boxes <- cpue_boxes %>% rowwise() %>% 
+    mutate(corrected_cpue = ifelse(.bx0>91&botz>=-200,all_years_kgkm2*correction_factors[which(correction_factors$group == this_group),2],
+                                   ifelse(.bx0>91&botz < -200,all_years_kgkm2*correction_factors[which(correction_factors$group == this_group),3],
+                                          all_years_kgkm2))) %>% ungroup()
+  
+  # multiply by area to get biomass, then get proportion
+  cpue_boxes <- cpue_boxes %>% mutate(corrected_biomass = corrected_cpue*area.x/1e6/1000,
+                                      corrected_prop = corrected_biomass/sum(corrected_biomass,na.rm=TRUE)) # need to divide by 1e6 because CPUE is in kgkm2 but areas are in m. Also divide by 1000 to get tons, although not relevant here as we care about the proportion
+  
+  # plot 
+  p1 <- ggplot()+
+    geom_sf(data = cpue_boxes, aes(fill = corrected_prop), size = 0.2)+
+    scale_fill_viridis()+
+    geom_sf(data = coast_sf)+
+    theme_minimal()+
+    labs(title = paste0(this_group,"_S1-S4 after bias correction"))
+  
+  ggsave(paste0("maps_corrected/",this_group,".png"), p1, width = 8, height = 3.5, units = "in", dpi = 600)
+  
+}
+
+lapply(ag,biomass_maps)
+```
+
