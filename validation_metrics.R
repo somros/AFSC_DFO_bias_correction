@@ -2,14 +2,18 @@
 library(tidyverse)
 library(data.table)
 
-akfin_files <- list.files("../sdmTMB_forGemma_May2021/output/validation_tables/", full.names = TRUE)
-dfo_files <- list.files("../Canada/outputs/knitted_output_afterSean/validation_tables/", full.names = TRUE)
+akfin_files <- list.files("../sdmTMB_stages/output/validation_tables/", full.names = TRUE)
+dfo_files <- list.files("../Canada_stages/outputs/validation_tables/", full.names = TRUE)
 
-akfin_val <- rbindlist(lapply(akfin_files, read.csv))
+read_and_name <- function(x){
+  y <- read.csv(x)
+  y <- y %>% mutate(Filename = x) %>% distinct()
+}
 
-dfo_val <- rbindlist(lapply(dfo_files, read.csv))
+akfin_val <- rbindlist(lapply(akfin_files, read_and_name))
+
+dfo_val <- rbindlist(lapply(dfo_files, read_and_name))
 
 #write out
-
-write.csv(akfin_val,"akfin_validation.csv",row.names = FALSE)
-write.csv(dfo_val,"dfo_validation.csv",row.names = FALSE)
+write.csv(akfin_val,"akfin_validation_stages.csv",row.names = FALSE)
+write.csv(dfo_val,"dfo_validation_stages.csv",row.names = FALSE)
