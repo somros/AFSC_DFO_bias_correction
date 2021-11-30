@@ -1,0 +1,327 @@
+---
+title: "Applying bias correction to AFSC and DFO bottom trawl data"
+author: "Alberto Rovellini"
+date: "7/13/2021"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This document applies the bias correction factor (as calculated in `bias_correction_factor_calculator.Rmd`) to the box-specific biomass values of the Atlantis functional groups. It does so only to the groups that have a score of 6 or less in the combined AKFIN and DFO skill validation table. In brief, for reference:
+
+Each sdmTMB model was evaluated by extracting: convergence codes, convergence messages, maximum likelihood gradient, practical range, R$^2$, RMSE, relative RMSE (see sdmTMB routines for details). Also, each model was evaluated by visual inspection of model fit, model residuals, number of data points. Based on this visual inspection, a score between 1 and 3 was assigned to the model, where:
+
+1. Many data points, good model fits, residuals look good.
+2. Fewer data points, good model fit, residuals look good.
+3. Few data points, poor model fit, patterns in the residuals.
+
+Then, based on the visual assessment and on the skill evaluation metrics listed above, another score was assigned to each model, where:
+
+1. R>0.7, good convergence, range > 20 km, 1 for visual
+2. R>0.5, good convergence, range > 20 km, 1-2 for visual
+3. R<0.5 or convergence issues or range issues and 2-3 for visual
+4. Minimal data
+5. No convergence - discard
+
+This was done for AKFIN and DFO separately, then the scores were added for each group. Based on the resulting score, we decide whether or not we apply the bias correction (and whether we use the models at all). 
+
+Some notes: for DFO 4 and AKFIN <3, we still use sdmTMB, because the AFSC data makes up for most of the model domain. In addition, for some of the groups with a score of 7+ we may still need to use this data if there is nothing better to map their distribution. For example, TAN has a score of 2 in the GOA, but did not converge in BC, so the total score is 7. Look into crabs reports for better indications of biomass and distribution, but if nothing is available we can resort to this data in some form. In general, anything with a score of 3 in the AKFIN column should be treated with care. Scores of 4 in the DFO column mean poor performance in BC. Discard anything that did not converge in the AKFIN data.
+
+\textcolor{red}{__Important__}: some of these correction factors are really large (e.g. orders of magnitude), and there is no way yet of knowing whether they are appropriate or not. The bias bewteen surveys may actually be a true difference in abundance at the interface between surveys, and applying the resulting bias correction to all boxes in the BC part of the model domain may significantly skew the biomass distribution. In addition, the argument can be made that decreasing the biomass in BC based on lower catches in SE Alaska is an artefact, because that biomass exists in BC and has been fished, and it would make more sense to inflate the GOA biomass based on the BC catches instead, according to the same principle. However, it is very important here to keep in mind that we are __NOT__ using these as biomass estimates for the model, but rather to model coarse distributions of organisms across the model domain. To this end, it looks appropriate to correct for systematic bias where that is present. Furthermore, modifying the entire GOA biomass based on BC catches does not sound like a good idea.
+
+Circle back to this if things look dodgy with the final distributions - which for some groups they will. Beware of groups where there are high concentrations in one box - those are most likely wrong. Circle back to the sdmTMB models and see what is wrong.
+
+```{r, message = FALSE}
+library(tidyverse)
+library(sf)
+library(maps)
+library(mapdata)
+library(rbgm)
+library(viridis)
+library(readxl)
+library(data.table)
+```
+
+```{r}
+select <- dplyr::select
+```
+
+# Read data
+
+Read in spatial information.
+```{r}
+# bgm
+atlantis_bgm <- read_bgm("data/GOA_WGS84_V4_final.bgm")
+atlantis_boxes <- box_sf(atlantis_bgm)
+
+#coastline
+coast <- maps::map("worldHires", regions = c("Canada", "USA"), plot = FALSE, fill = TRUE)
+coast_sf <- coast %>% st_as_sf() %>% st_transform(crs = atlantis_bgm$extra$projection)
+coast_sf <- coast_sf %>% st_crop(st_bbox(atlantis_boxes))
+```
+
+Get the groups that we have for both AFSC and DFO.
+```{r}
+afsc_groups <- list.files("../sdmTMB_stages/output/cpue_tables/")
+afsc_groups <- gsub("_AFSC.csv","",afsc_groups)
+
+dfo_groups <- list.files("../Canada_stages/outputs/cpue_tables/")
+dfo_groups <- gsub("_DFO.csv","",dfo_groups)
+
+both_groups <- base::intersect(afsc_groups,dfo_groups)
+```
+
+Read in the model skill evaluation index, and stitch it to the groups.
+```{r}
+val <- readxl::read_xlsx("validation_stages.xlsx", "GOA", col_types = c(rep("text",2),rep("numeric",3)))
+
+val_groups <- val %>% 
+  mutate(Name_stage = paste0(Group,Stage)) %>%
+  drop_na() %>% filter(GOA < 7) %>% select(Name_stage) %>% pull()
+```
+
+Subset the group list to those that we can apply the correction to.
+```{r}
+both_groups_val <- intersect(both_groups,val_groups)
+```
+
+# Groups for which bias correction can be done
+
+Read in the bias correction factors.
+```{r}
+correction_factors <- read.csv("correction_factors_stages.csv")
+correction_factors <- correction_factors[complete.cases(correction_factors),]
+correction_factors <- correction_factors %>% filter_all(all_vars(!is.infinite(.)))
+
+ag <- intersect(both_groups_val, correction_factors %>% select(group) %>% pull())
+```
+
+Write a function that:
+
+1. Read in biomass maps for AFSC and DFO.
+2. Reads the correction factors.
+3. Plots a map before the correction for the entire GOA based on biomass estimates for each box.
+4. Applies the correction factor to the biomass value in the DFO boxes.
+5. Calclates the new proportions.
+6. Plots a map after the bias correction.
+7. Writes out the S1-S4 values.
+
+```{r}
+apply_bias_correction <- function(this_group){
+  
+  afsc <- read.csv(paste0("../sdmTMB_stages/output/cpue_tables/",this_group,"_AFSC.csv"))
+  dfo <- read.csv(paste0("../Canada_stages/outputs/cpue_tables/",this_group,"_DFO.csv"))
+  
+  goa <- rbind(afsc,dfo) %>% select(-area,-boundary)
+  
+  cpue_boxes <- atlantis_boxes %>% left_join(goa, by = c(".bx0" = "box_id"))
+  cpue_boxes <- cpue_boxes %>% select(.bx0,boundary,botz,area,all_years_kgkm2,biomass)
+  
+  # calculate proportion of the total
+  cpue_boxes <- cpue_boxes %>% mutate(prop = biomass/sum(biomass,na.rm=TRUE))
+  
+  # plot
+  p <- ggplot()+
+    geom_sf(data = cpue_boxes, aes(fill = log1p(all_years_kgkm2)), size = 0.2)+
+    scale_fill_viridis()+
+    geom_sf(data = coast_sf)+
+    theme_minimal()+
+    labs(title = paste0(this_group,"_S1-S4 before bias correction"), fill='Log(CPUE) kg km-2')
+  
+  
+  ggsave(paste0("maps_with_bias_cpue_stages/",this_group,".jpg"), p, width = 8, height = 3.5, units = "in", dpi = 600)
+  
+  # now apply the bias correction to the dfo data
+  
+  cpue_boxes <- cpue_boxes %>% rowwise() %>% 
+    mutate(corrected_cpue = ifelse(.bx0>91&botz>=-200,all_years_kgkm2*correction_factors[which(correction_factors$group == this_group),2],
+                                   ifelse(.bx0>91&botz < -200,all_years_kgkm2*correction_factors[which(correction_factors$group == this_group),3], all_years_kgkm2))) %>% ungroup()
+  
+  # multiply by area to get biomass, then get proportion
+  cpue_boxes <- cpue_boxes %>% mutate(corrected_biomass = corrected_cpue*area/1e6/1000,
+                                      corrected_prop = corrected_biomass/sum(corrected_biomass,na.rm=TRUE)) # need to divide by 1e6 because CPUE is in kgkm2 but areas are in m. Also divide by 1000 to get tons, although not relevant here as we care about the proportion
+  
+  # plot 
+  p1 <- ggplot()+
+    geom_sf(data = cpue_boxes, aes(fill = log1p(corrected_cpue)), size = 0.2)+
+    scale_fill_viridis()+
+    geom_sf(data = coast_sf)+
+    theme_minimal()+
+    labs(title = paste0(this_group,"_S1-S4 after bias correction"), fill='Log(CPUE) kg km-2')
+  
+  ggsave(paste0("maps_corrected_cpue_stages/",this_group,".jpg"), p1, width = 8, height = 3.5, units = "in", dpi = 600)
+  
+  # write out the correct values of S1-S4.
+  
+  s1_s4_this_group <- cpue_boxes %>% st_set_geometry(NULL) %>% select(.bx0,corrected_prop,boundary) %>% mutate(Group = this_group)
+  return(s1_s4_this_group)
+}
+```
+
+Apply this function to all groups, and write it out.
+```{r}
+s1_s4_long <- lapply(ag,apply_bias_correction) %>% rbindlist() 
+s1_s4_wide <- s1_s4_long %>% pivot_wider(names_from = Group,values_from = corrected_prop)
+
+# write.csv(s1_s4, "S1-S4.csv", row.names = FALSE)
+```
+
+A few important notes.
+
+1. This does not cover all groups in Atlantis GOA. Most notably, none of the mammals, plankton, seabirds, and a number of pelagic species.
+2. **A few boxes have no biomass**. This happened to a few small boxes that had no prediction points in them. Let's explore, exactly, which boxes those are.
+
+```{r}
+empty_boxes <- s1_s4_wide[!complete.cases(s1_s4_wide),]
+empty_boxes <- empty_boxes[-which(empty_boxes$boundary),c(1,2)]
+empty_boxes$flag_empty <- 1
+
+# view on a map
+atlantis_boxes %>% left_join(empty_boxes,by=".bx0") %>%
+  ggplot()+
+  geom_sf(aes(fill=factor(flag_empty)))
+```
+
+Of the 6 boxes with no values, 3 are island boxes. The rest are the very small buffer boxes: 1, 63, 86. Correct those, because even if they are small, missing groups will cause biomasses to explode and other weird things to happen. Assign a small value, as small as the smallest other non-zero value. Take that amount off of the highest proportion in the model domain.
+```{r}
+b <- c(1,63,86)
+
+s1_s4_long_final <- s1_s4_long %>% 
+  group_by(Group) %>% 
+  mutate(minval = min(corrected_prop[corrected_prop>0],na.rm=TRUE), maxval = max(corrected_prop,na.rm=TRUE)) %>% 
+  ungroup() %>% 
+  rowwise() %>% 
+  mutate(new_prop = ifelse(.bx0%in%b,sum(corrected_prop,minval,na.rm=TRUE),corrected_prop)) %>%
+  mutate(new_prop = ifelse(new_prop == maxval,corrected_prop-3*minval,new_prop)) %>%
+  ungroup() %>%
+  select(-maxval,-minval,-corrected_prop)
+
+# repeat 4 times
+s1_s4_long_final <- purrr::map_dfr(seq_len(4), ~s1_s4_long_final) %>%
+  mutate(Sn = rep(c('S1','S2','S3','S4'), each = nrow(s1_s4_long_final)),
+         S = paste(substr(Group,1,(nchar(Group)-1)),substr(Group,nchar(Group),nchar(Group)),Sn,sep='_')) %>%
+  arrange(.bx0,Group) %>%
+  select(.bx0,S,new_prop)
+
+s1_s4_wide_final <- s1_s4_long_final %>% 
+  pivot_wider(names_from = S,values_from = new_prop) 
+```
+
+# Some more groups
+
+The following is for groups that appear in both data sets and have a validations score <7 but did not have a correction factor for both depth strata because the biomass was 0 in the area of interest for one of the two surveys, resulting in a correction factor of 0 and Inf. In these cases, we just stitch box biomass from the respective CPUE tables for the two surveys without applying a correction factor.
+```{r}
+other_groups <- setdiff(both_groups_val,ag)
+
+stitch_surveys_no_correction <- function(this_group){
+  
+  afsc <- read.csv(paste0("../sdmTMB_stages/output/cpue_tables/",this_group,"_AFSC.csv"))
+  dfo <- read.csv(paste0("../Canada_stages/outputs/cpue_tables/",this_group,"_DFO.csv"))
+  
+  goa <- rbind(afsc,dfo) %>% select(-area,-boundary)
+  
+  cpue_boxes <- atlantis_boxes %>% left_join(goa, by = c(".bx0" = "box_id"))
+  cpue_boxes <- cpue_boxes %>% select(.bx0,boundary,botz,area,all_years_kgkm2,biomass)
+  
+  # calculate proportion of the total
+  cpue_boxes <- cpue_boxes %>% mutate(prop = biomass/sum(biomass,na.rm=TRUE))
+  
+  # plot
+  p <- ggplot()+
+    geom_sf(data = cpue_boxes, aes(fill = log1p(all_years_kgkm2)), size = 0.2)+
+    scale_fill_viridis()+
+    geom_sf(data = coast_sf)+
+    theme_minimal()+
+    labs(title = paste0(this_group,"_S1-S4 before bias correction"), fill='Log(CPUE) kg km-2')
+  
+  ggsave(paste0("maps_corrected_cpue_stages/",this_group,".jpg"), p, width = 8, height = 3.5, units = "in", dpi = 600)
+  
+  # write out the correct values of S1-S4.
+  
+  s1_s4_this_group <- cpue_boxes %>% st_set_geometry(NULL) %>% select(.bx0,prop,boundary) %>% mutate(Group = this_group)
+  return(s1_s4_this_group)
+}
+
+s1_s4_long_other <- lapply(other_groups,stitch_surveys_no_correction) %>% rbindlist() 
+s1_s4_wide_other <- s1_s4_long_other %>% pivot_wider(names_from = Group,values_from = prop)
+```
+
+Fill in empty boxes.
+```{r}
+b <- c(1,63,86)
+
+s1_s4_long_final_other <- s1_s4_long_other %>% 
+  group_by(Group) %>% 
+  mutate(minval = min(prop[prop>0],na.rm=TRUE), maxval = max(prop,na.rm=TRUE)) %>% 
+  ungroup() %>% 
+  rowwise() %>% 
+  mutate(new_prop = ifelse(.bx0%in%b,sum(prop,minval,na.rm=TRUE),prop)) %>%
+  mutate(new_prop = ifelse(new_prop == maxval,prop-3*minval,new_prop)) %>%
+  ungroup() %>%
+  select(-maxval,-minval,-prop)
+
+# repeat 4 times
+s1_s4_long_final_other <- purrr::map_dfr(seq_len(4), ~s1_s4_long_final_other) %>%
+  mutate(Sn = rep(c('S1','S2','S3','S4'), each = nrow(s1_s4_long_final_other)),
+         S = paste(substr(Group,1,(nchar(Group)-1)),substr(Group,nchar(Group),nchar(Group)),Sn,sep='_')) %>%
+  arrange(.bx0,Group) %>%
+  select(.bx0,S,new_prop)
+
+s1_s4_wide_final_other <- s1_s4_long_final_other %>% 
+  pivot_wider(names_from = S,values_from = new_prop) 
+```
+
+# Write out
+
+Write a table with all combinations of groups and stages, and populate it with the values above for the groups that have S1-S4 values.
+```{r}
+atlantis_groups <- readxl::read_xlsx("GOA_Groups.xlsx", "Sheet1")
+atlantis_groups <- atlantis_groups %>% select(Code,Index,Name,GroupType)
+
+verts <- atlantis_groups %>% filter(GroupType %in% c('FISH','MAMMAL','BIRD','SHARK')) %>% pull(Name)
+inverts <- atlantis_groups %>% filter(Name %in% setdiff(atlantis_groups$Name, verts)) %>% pull(Name)
+
+verts_stages <- paste(rep(verts,each=2),c('A','J'),sep='_')
+inverts_stages <- paste(inverts,'A',sep='_') # this one means no stage actually
+
+# add s1 s4 params
+verts_s <- paste(rep(verts_stages,each=4), c('S1','S2','S3','S4'), sep='_')
+inverts_s <- paste(rep(inverts_stages,each=4), c('S1','S2','S3','S4'), sep='_')
+
+all_groups <- c(verts_s,inverts_s)
+
+s1_s4 <- matrix(0, nrow = nrow(s1_s4_wide_final), ncol = length(all_groups)) %>% 
+  data.frame() %>%
+  set_names(all_groups)
+
+# replace cols with S1-S4 cols where available
+# first for the groups that had a bias correction done
+avail_groups <- colnames(s1_s4_wide_final)[-1]
+for(i in 1:length(avail_groups)){
+  t <- avail_groups[i]
+  s1_s4[,t] <- s1_s4_wide_final[,t]
+}
+# then for the groups that are the mere stitching of biomasses from the surveys
+avail_groups_other <- colnames(s1_s4_wide_final_other)[-1]
+for(i in 1:length(avail_groups_other)){
+  t <- avail_groups_other[i]
+  s1_s4[,t] <- s1_s4_wide_final_other[,t]
+}
+
+# now separate verts from inverts
+s1_s4_verts <- s1_s4 %>% select(all_of(verts_s))
+s1_s4_inverts <- s1_s4 %>% select(all_of(inverts_s))
+
+# turn NA to 0
+s1_s4_verts[is.na(s1_s4_verts)] <- 0
+s1_s4_inverts[is.na(s1_s4_inverts)] <- 0
+
+write.csv(s1_s4_verts, "S1-S4_stages_verts.csv", row.names = FALSE)
+write.csv(s1_s4_inverts, "S1-S4_stages_inverts.csv", row.names = FALSE)
+```
