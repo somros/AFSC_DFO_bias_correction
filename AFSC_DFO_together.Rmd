@@ -23,13 +23,13 @@ Each sdmTMB model was evaluated by extracting: convergence codes, convergence me
 
 Then, based on the visual assessment and on the skill evaluation metrics listed above, another score was assigned to each model, where:
 
-1. R>0.5, good convergence, range > 20 km, 1 for visual
-2. R>0.5, good convergence, range > 20 km, 2 for visual
-3. R<0.5 or convergence issues or range issues and 2, or 3 for visual
+1. R>0.7, good convergence, range > 20 km, 1 for visual
+2. R>0.5, good convergence, range > 20 km, 1-2 for visual
+3. R<0.5 or convergence issues or range issues and 2-3 for visual
 4. Minimal data
 5. No convergence - discard
 
-This was done for AKFIN and DFO separately, then the scores were added for each group. Based on the resulting score, we decide whether or not we apply the bias correction (and whether we can trus the models at all). 
+This was done for AKFIN and DFO separately, then the scores were added for each group. Based on the resulting score, we decide whether or not we apply the bias correction (and whether we use the models at all). 
 
 Some notes: for DFO 4 and AKFIN <3, we still use sdmTMB, because the AFSC data makes up for most of the model domain. In addition, for some of the groups with a score of 7+ we may still need to use this data if there is nothing better to map their distribution. For example, TAN has a score of 2 in the GOA, but did not converge in BC, so the total score is 7. Look into crabs reports for better indications of biomass and distribution, but if nothing is available we can resort to this data in some form. In general, anything with a score of 3 in the AKFIN column should be treated with care. Scores of 4 in the DFO column mean poor performance in BC. Discard anything that did not converge in the AKFIN data.
 
@@ -68,20 +68,22 @@ coast_sf <- coast_sf %>% st_crop(st_bbox(atlantis_boxes))
 
 Get the groups that we have for both AFSC and DFO.
 ```{r}
-afsc_groups <- list.files("C:/Users/arove/Documents/GOA/SDM/sdmTMB_forGemma_May2021/output/cpue_tables/")
+afsc_groups <- list.files("../sdmTMB_stages/output/cpue_tables/")
 afsc_groups <- gsub("_AFSC.csv","",afsc_groups)
 
-dfo_groups <- list.files("C:/Users/arove/Documents/GOA/SDM/Canada/outputs/knitted_output_afterSean/cpue_tables/")
+dfo_groups <- list.files("../Canada_stages/outputs/cpue_tables/")
 dfo_groups <- gsub("_DFO.csv","",dfo_groups)
 
-ag <- intersect(afsc_groups,dfo_groups)
+ag <- base::intersect(afsc_groups,dfo_groups)
 ```
 
 Read in the model skill evaluation index, and stitch it to the groups.
 ```{r}
-val <- readxl::read_xlsx("validation.xlsx", "GOA", col_types = c("text",rep("numeric",3)))
+val <- readxl::read_xlsx("validation_stages.xlsx", "GOA", col_types = c(rep("text",2),rep("numeric",3)))
 
-val_groups <- val %>% drop_na() %>% filter(GOA < 7) %>% select(Group) %>% pull()
+val_groups <- val %>% 
+  mutate(Name_stage = paste0(Group,Stage)) %>%
+  drop_na() %>% filter(GOA < 7) %>% select(Name_stage) %>% pull()
 ```
 
 Subset the group list to those that we can apply the correction to.
@@ -91,7 +93,7 @@ ag <- intersect(ag,val_groups)
 
 Read in the bias correction factors.
 ```{r}
-correction_factors <- read.csv("correction_factors.csv")
+correction_factors <- read.csv("correction_factors_stages.csv")
 correction_factors <- correction_factors[complete.cases(correction_factors),]
 correction_factors <- correction_factors %>% filter_all(all_vars(!is.infinite(.)))
 
@@ -110,8 +112,11 @@ Write a function that:
 
 ```{r}
 apply_bias_correction <- function(this_group){
-  afsc <- read.csv(paste0("C:/Users/arove/Documents/GOA/SDM/sdmTMB_forGemma_May2021/output/cpue_tables/",this_group,"_AFSC.csv"))
-  dfo <- read.csv(paste0("C:/Users/arove/Documents/GOA/SDM/Canada/outputs/knitted_output_afterSean/cpue_tables/",this_group,"_DFO.csv"))
+  
+  this_group <- ag[1]
+  
+  afsc <- read.csv(paste0("../sdmTMB_stages/output/cpue_tables/",this_group,"_AFSC.csv"))
+  dfo <- read.csv(paste0("../Canada_stages/outputs/cpue_tables/",this_group,"_DFO.csv"))
   
   goa <- rbind(afsc,dfo) %>% select(-area,-boundary)
   
@@ -123,21 +128,20 @@ apply_bias_correction <- function(this_group){
   
   # plot
   p <- ggplot()+
-    geom_sf(data = cpue_boxes, aes(fill = prop), size = 0.2)+
+    geom_sf(data = cpue_boxes, aes(fill = log1p(all_years_kgkm2)), size = 0.2)+
     scale_fill_viridis()+
     geom_sf(data = coast_sf)+
     theme_minimal()+
-    labs(title = paste0(this_group,"_S1-S4 before bias correction"))
+    labs(title = paste0(this_group,"_S1-S4 before bias correction"), fill='Log(CPUE) kg km-2')
   
   
-  ggsave(paste0("maps_with_bias/",this_group,".png"), p, width = 8, height = 3.5, units = "in", dpi = 600)
+  ggsave(paste0("maps_with_bias_cpue_stages/",this_group,".jpg"), p, width = 8, height = 3.5, units = "in", dpi = 600)
   
   # now apply the bias correction to the dfo data
   
   cpue_boxes <- cpue_boxes %>% rowwise() %>% 
     mutate(corrected_cpue = ifelse(.bx0>91&botz>=-200,all_years_kgkm2*correction_factors[which(correction_factors$group == this_group),2],
-                                   ifelse(.bx0>91&botz < -200,all_years_kgkm2*correction_factors[which(correction_factors$group == this_group),3],
-                                          all_years_kgkm2))) %>% ungroup()
+                                   ifelse(.bx0>91&botz < -200,all_years_kgkm2*correction_factors[which(correction_factors$group == this_group),3], all_years_kgkm2))) %>% ungroup()
   
   # multiply by area to get biomass, then get proportion
   cpue_boxes <- cpue_boxes %>% mutate(corrected_biomass = corrected_cpue*area/1e6/1000,
@@ -145,13 +149,13 @@ apply_bias_correction <- function(this_group){
   
   # plot 
   p1 <- ggplot()+
-    geom_sf(data = cpue_boxes, aes(fill = corrected_prop), size = 0.2)+
+    geom_sf(data = cpue_boxes, aes(fill = log1p(corrected_cpue)), size = 0.2)+
     scale_fill_viridis()+
     geom_sf(data = coast_sf)+
     theme_minimal()+
-    labs(title = paste0(this_group,"_S1-S4 after bias correction"))
+    labs(title = paste0(this_group,"_S1-S4 after bias correction"), fill='Log(CPUE) kg km-2')
   
-  ggsave(paste0("maps_corrected/",this_group,".png"), p1, width = 8, height = 3.5, units = "in", dpi = 600)
+  ggsave(paste0("maps_corrected_cpue_stages/",this_group,".jpg"), p1, width = 8, height = 3.5, units = "in", dpi = 600)
   
   # write out the correct values of S1-S4.
   
@@ -201,5 +205,5 @@ s1_s4_long_final <- s1_s4_long %>%
 
 s1_s4_wide_final <- s1_s4_long_final %>% pivot_wider(names_from = Group,values_from = new_prop)
 
-write.csv(s1_s4_wide_final, "S1-S4.csv", row.names = FALSE)
+write.csv(s1_s4_wide_final, "S1-S4_stages.csv", row.names = FALSE)
 ```

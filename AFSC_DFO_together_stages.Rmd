@@ -112,6 +112,7 @@ Write a function that:
 6. Plots a map after the bias correction.
 7. Writes out the S1-S4 values.
 
+Do not do this for slope assemblage rockfish (see notes below).
 ```{r}
 apply_bias_correction <- function(this_group){
   
@@ -166,7 +167,7 @@ apply_bias_correction <- function(this_group){
 
 Apply this function to all groups, and write it out.
 ```{r}
-s1_s4_long <- lapply(ag,apply_bias_correction) %>% rbindlist() 
+s1_s4_long <- lapply(ag[ag!='Rockfish_slopeJ'&ag!='Rockfish_slopeA'],apply_bias_correction) %>% rbindlist() # no RFS, see below
 s1_s4_wide <- s1_s4_long %>% pivot_wider(names_from = Group,values_from = corrected_prop)
 
 # write.csv(s1_s4, "S1-S4.csv", row.names = FALSE)
@@ -216,8 +217,10 @@ s1_s4_wide_final <- s1_s4_long_final %>%
 # Some more groups
 
 The following is for groups that appear in both data sets and have a validations score <7 but did not have a correction factor for both depth strata because the biomass was 0 in the area of interest for one of the two surveys, resulting in a correction factor of 0 and Inf. In these cases, we just stitch box biomass from the respective CPUE tables for the two surveys without applying a correction factor.
+
+In addition, we also do this for the rockfish - slope assemblage group. The species composition of this large multi-species complex, based on the catch in RACE-GAP and in the DFO data, is profoundly different between AK and BC. Therefore, there is no reason to expect the same proportion of each species to be caught in BC, and therefore correcting the BC CPUE by the AK one is most likely going to do more harm than not doing anything.
 ```{r}
-other_groups <- setdiff(both_groups_val,ag)
+other_groups <- c(setdiff(both_groups_val,ag),'Rockfish_slopeJ','Rockfish_slopeA')
 
 stitch_surveys_no_correction <- function(this_group){
   

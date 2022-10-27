@@ -18,9 +18,9 @@ data points in the SE GOA and N BC, between 54 and 55 N. The two surveys meet ap
 
 Some observations:
 
-1. An attempt was made to characterize bias by year. This was dropped because the sample size for the AFSC is too small.
+1. An attempt was made to characterize bias by year. This was dropped because the sample size for the AFSC is too small in the area of interest.
 2. In general, sample size is different, i.e. there are a lot more tows for the DFO sets than for AFSC.
-3. Initially I excluded the WCHG data, since we do not use those for sdmTMB (for now). However, that data contains shelf and slope information for the BC part of the model. Hecate Strait is a large flat (mud? sand? rock?), and as such likely a different habitat from the GOA shelf. For this reason, WCHG is actually useful to have here. Since we are not considering years for the purposes of this, it does not matter that that is the only area sampled in even years.
+3. Initially I excluded the WCHG data, since we do not use those for sdmTMB. However, that data contains shelf and slope information for the BC part of the model. Hecate Strait is a relatively shallow flat (mud? sand? rock?), and as such likely a different habitat from the GOA shelf. For this reason, WCHG is actually useful to have here. Since we are not considering years for the purposes of this, it does not matter that that is the only area sampled in even years.
 4. A proper depth structure is difficult to achieve. FOr example, one would like to have bias specific to depth bins. However, AFSC data points are not enough for this. For this reason, we use 200 m as arbitrary cutoff between "shallow" and "deep" areas, to keep at least some depth structure in the bias correction.
 5. Points 1 and 4 mean that we assume that: (a) the bias does not change over time; (b) the bias may change at different depths. Get back to this after reading about differences in the gear setup (e.g. height above bottom). Fishing protocol is similar (3 knots, ~15 minutes tows, skipper decides whether a place can be towed or not, etc.). So what could cause a bias then? Is there a reason to believe that differences are due to sampling bias and not to differences in habitat?
 6. Here we are using data from all months for both AKFIN and DFO. Because we had to get rid of the temporal structure, there may be bias deriving from a sampling bias between different months. I am assuming that, because most sampling events are in the summer months for both data sets, any potential outlier coming from sampling in September or October (very few instances in the AFSC data) should be evened out over the time period we are considering.
@@ -51,7 +51,6 @@ rm(cpue)
 hauls <- read.csv("C:/Users/arove/Documents/GOA/SDM/sdmTMB_forGemma_May2021/catch_to_CPUE_AKFIN/Haul Descriptions.csv", fileEncoding = "UTF-8-BOM")
 
 # DFO CPUE
-
 path_to_surveys <- "C:/Users/arove/Documents/GOA/SDM/Canada/data/surveys"
 all_surveys <- dir(path_to_surveys)
 
@@ -237,7 +236,7 @@ get_bias_correction <- function(this_group){
 }
 ```
 
-Apply the function above to all groups that appear n both data sets.
+Apply the function above to all groups that appear in both data sets.
 ```{r, echo=FALSE, message=FALSE, warning=FALSE}
 # identify the groups in common
 groups_akfin <- akfin_data %>% select(CN) %>% distinct() %>% pull()
